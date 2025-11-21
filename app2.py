@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
-from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
-from geopy.exc import GeocoderUnavailable, GeocoderTimedOut, GeocoderServiceError
 import folium
 from streamlit_folium import st_folium
 from io import BytesIO
@@ -17,6 +15,7 @@ def load_data():
     df = pd.read_excel("251024_Aggregated_Centers_Final_v2.xlsx")
     if not {"Latitude", "Longitude"}.issubset(df.columns):
         st.error("❌ Missing Latitude/Longitude columns. Please upload the fully geocoded file.")
+    # Build a full address string for selection
     df["Full_Address"] = (
         df["Strasse"].astype(str) + ", " + df["PLZ"].astype(str) + " " + df["Stadt"].astype(str)
     )
@@ -24,44 +23,20 @@ def load_data():
 
 df = load_data()
 
-# --- Geolocator ---
-# TIP: for production with Nominatim, add a contact email in the user_agent string
-# e.g. user_agent="sanoptis-center-finder-your-email"
-geolocator = Nominatim(user_agent="sanoptis-center-finder", timeout=10)
-
-
-@st.cache_data(show_spinner=False)
-def geocode_address(address: str):
-    """
-    Geocode an address using Nominatim.
-    Returns (lat, lon) or None if not found or if the service is unavailable.
-    This prevents the app from crashing with GeocoderUnavailable errors.
-    """
-    try:
-        location = geolocator.geocode(address)
-    except (GeocoderUnavailable, GeocoderTimedOut, GeocoderServiceError):
-        # If the external geocoding service is down or unreachable,
-        # just return None so the app can handle it gracefully.
-        return None
-    except Exception:
-        # Catch-all to avoid hard crashes for unexpected geopy/network errors
-        return None
-
-    if location:
-        return (location.latitude, location.longitude)
-    return None
-
-
 # --- Search Inputs ---
 st.subheader("🔍 Search Parameters")
 
 col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
 
 with col1:
-    user_address = st.text_input(
-        "Enter an address (e.g. Maximilianstrasse 1, München):",
+    # Instead of free text + geocoding, we select from pre-geocoded addresses in Excel
+    address_options = sorted(df["Full_Address"].dropna().unique().tolist())
+    address_placeholder = "-- Select a center/address as origin --"
+    user_address = st.selectbox(
+        "Select an address / center (uses pre-geocoded coordinates from Excel):",
+        options=[address_placeholder] + address_options,
+        index=0,
         key="user_address",
-        placeholder="Type an address here..."
     )
 
 with col2:
@@ -86,19 +61,17 @@ with col5:
 
 # --- Run Search ---
 if "search_started" in st.session_state and st.session_state["search_started"]:
-    if not user_address:
-        st.warning("⚠️ Please enter an address before searching.")
+    if not user_address or user_address == address_placeholder:
+        st.warning("⚠️ Please select an origin address/center before searching.")
     else:
-        user_location = geocode_address(user_address)
+        # Get the selected origin row from the DataFrame
+        origin_row = df[df["Full_Address"] == user_address].iloc[0]
 
-        if not user_location:
-            # Covers both "not found" and "geocoding service unavailable" cases
-            st.error(
-                "❌ The address could not be geocoded. "
-                "This may be due to an invalid address or a temporary issue with the geocoding service. "
-                "Please try again later or refine the address."
-            )
+        if pd.isna(origin_row["Latitude"]) or pd.isna(origin_row["Longitude"]):
+            st.error("❌ The selected address has no valid coordinates in the Excel file.")
         else:
+            user_location = (origin_row["Latitude"], origin_row["Longitude"])
+
             # Compute distance to each center
             df["Distance_km"] = df.apply(
                 lambda row: geodesic(user_location, (row["Latitude"], row["Longitude"])).km
@@ -108,7 +81,10 @@ if "search_started" in st.session_state and st.session_state["search_started"]:
             )
 
             filtered_df = df[df["Distance_km"] <= radius_km].copy()
-            st.success(f"✅ {len(filtered_df)} centers found within {radius_km} km of your address.")
+            st.success(
+                f"✅ {len(filtered_df)} centers found within {radius_km} km of: "
+                f"**{user_address}**"
+            )
 
             # --- Map ---
             m = folium.Map(location=user_location, zoom_start=9)
@@ -123,15 +99,17 @@ if "search_started" in st.session_state and st.session_state["search_started"]:
                     fill_opacity=0.1
                 ).add_to(m)
 
-            # Marker for user location
+            # Marker for selected origin
             folium.Marker(
-                user_location, popup="📍 Your Address", icon=folium.Icon(color="red")
+                user_location,
+                popup=f"📍 Origin: {user_address}",
+                icon=folium.Icon(color="red"),
             ).add_to(m)
 
             # --- Markers for centers ---
             for _, row in filtered_df.iterrows():
                 # Format number of doctors as clean integer or "N/A"
-                if pd.notnull(row["num_doctors"]) and str(row["num_doctors"]).strip().lower() != "n/a":
+                if pd.notnull(row.get("num_doctors")) and str(row["num_doctors"]).strip().lower() != "n/a":
                     try:
                         num_docs_display = str(int(float(row["num_doctors"])))
                     except Exception:
