@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
-from geopy.geocoders import Nominatim
+from geopy.geocoders import Nominatim, Photon
 from geopy.distance import geodesic
-from geopy.exc import GeocoderUnavailable, GeocoderTimedOut, GeocoderServiceError
 import folium
 from streamlit_folium import st_folium
 from io import BytesIO
@@ -24,28 +23,41 @@ def load_data():
 
 df = load_data()
 
-# --- Geolocator (for user input address only) ---
-# Tip: add a real email in user_agent for Nominatim stability
-geolocator = Nominatim(
-    user_agent="sanoptis-center-finder (your-email@example.com)",
-    timeout=10
-)
+# --- Geocoders ---
+# Fix 1 – eigener User-Agent für Nominatim
+nominatim_geolocator = Nominatim(user_agent="kliniken_de_app_v1", timeout=10)
+
+# Fix 3 – alternativer Geocoder (Photon)
+photon_geolocator = Photon(user_agent="kliniken_de_app_v1", timeout=10)
+
 
 @st.cache_data(show_spinner=False)
 def geocode_address(address: str):
     """
-    Geocode the free-text user address using Nominatim.
-    Returns (lat, lon) or None if not found / service unavailable.
+    Geocode free-text user address.
+    1) Try Nominatim with custom user-agent
+    2) On error or no result, fall back to Photon
+    Returns (lat, lon) or None.
     """
+    # --- Try Nominatim first ---
     try:
-        location = geolocator.geocode(address)
-    except (GeocoderUnavailable, GeocoderTimedOut, GeocoderServiceError):
-        return None
+        location = nominatim_geolocator.geocode(address)
+    except Exception:
+        # Fix 2 – Exception abfangen, damit die App nicht abstürzt
+        location = None
+
+    if location:
+        return (location.latitude, location.longitude)
+
+    # --- Fallback: Photon ---
+    try:
+        location = photon_geolocator.geocode(address)
     except Exception:
         return None
 
     if location:
         return (location.latitude, location.longitude)
+
     return None
 
 
@@ -89,11 +101,9 @@ if "search_started" in st.session_state and st.session_state["search_started"]:
         user_location = geocode_address(user_address)
 
         if not user_location:
-            # Covers invalid address + Nominatim/network issues
             st.error(
                 "❌ The address could not be geocoded. "
-                "This may be due to an invalid address or a temporary issue with the geocoding service. "
-                "Please refine the address or try again later."
+                "Please check the address or try again later."
             )
         else:
             # Compute distance to each center using pre-geocoded Lat/Long from Excel
