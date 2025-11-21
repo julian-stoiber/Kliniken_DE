@@ -2,10 +2,12 @@ import streamlit as st
 import pandas as pd
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
+from geopy.exc import GeocoderUnavailable, GeocoderTimedOut, GeocoderServiceError
 import folium
 from streamlit_folium import st_folium
 from io import BytesIO
 
+# --- Page Config ---
 st.set_page_config(page_title="Center Finder", layout="wide")
 st.title("🏥 Sanoptis Add-On Center Finder")
 
@@ -23,11 +25,28 @@ def load_data():
 df = load_data()
 
 # --- Geolocator ---
-geolocator = Nominatim(user_agent="center-finder")
+# TIP: for production with Nominatim, add a contact email in the user_agent string
+# e.g. user_agent="sanoptis-center-finder-your-email"
+geolocator = Nominatim(user_agent="sanoptis-center-finder", timeout=10)
 
-@st.cache_data
-def geocode_address(address):
-    location = geolocator.geocode(address)
+
+@st.cache_data(show_spinner=False)
+def geocode_address(address: str):
+    """
+    Geocode an address using Nominatim.
+    Returns (lat, lon) or None if not found or if the service is unavailable.
+    This prevents the app from crashing with GeocoderUnavailable errors.
+    """
+    try:
+        location = geolocator.geocode(address)
+    except (GeocoderUnavailable, GeocoderTimedOut, GeocoderServiceError):
+        # If the external geocoding service is down or unreachable,
+        # just return None so the app can handle it gracefully.
+        return None
+    except Exception:
+        # Catch-all to avoid hard crashes for unexpected geopy/network errors
+        return None
+
     if location:
         return (location.latitude, location.longitude)
     return None
@@ -37,21 +56,26 @@ def geocode_address(address):
 st.subheader("🔍 Search Parameters")
 
 col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
+
 with col1:
     user_address = st.text_input(
         "Enter an address (e.g. Maximilianstrasse 1, München):",
         key="user_address",
         placeholder="Type an address here..."
     )
+
 with col2:
     radius_km = st.number_input(
         "Radius (km):", min_value=5, max_value=200, value=50, step=5, key="radius"
     )
+
 with col3:
     show_circle = st.toggle("Show Radius Circle", value=True, key="show_circle")
+
 with col4:
     if st.button("🔎 Search"):
         st.session_state["search_started"] = True
+
 with col5:
     if st.button("🔄 Reset Search"):
         for key in ["search_started", "user_address", "radius", "show_circle"]:
@@ -66,8 +90,14 @@ if "search_started" in st.session_state and st.session_state["search_started"]:
         st.warning("⚠️ Please enter an address before searching.")
     else:
         user_location = geocode_address(user_address)
+
         if not user_location:
-            st.error("❌ Address could not be found. Please try again.")
+            # Covers both "not found" and "geocoding service unavailable" cases
+            st.error(
+                "❌ The address could not be geocoded. "
+                "This may be due to an invalid address or a temporary issue with the geocoding service. "
+                "Please try again later or refine the address."
+            )
         else:
             # Compute distance to each center
             df["Distance_km"] = df.apply(
@@ -104,7 +134,7 @@ if "search_started" in st.session_state and st.session_state["search_started"]:
                 if pd.notnull(row["num_doctors"]) and str(row["num_doctors"]).strip().lower() != "n/a":
                     try:
                         num_docs_display = str(int(float(row["num_doctors"])))
-                    except:
+                    except Exception:
                         num_docs_display = str(row["num_doctors"])
                 else:
                     num_docs_display = "N/A"
@@ -126,6 +156,7 @@ if "search_started" in st.session_state and st.session_state["search_started"]:
                     <b>Entfernung:</b> <span style="color:#444;">{row['Distance_km']:.1f} km</span>
                 </div>
                 """
+
                 folium.Marker(
                     location=[row["Latitude"], row["Longitude"]],
                     popup=popup_info,
